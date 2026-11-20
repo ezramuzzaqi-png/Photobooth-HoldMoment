@@ -1,8 +1,8 @@
 {{-- Mesin gambar strip (shared): dipakai halaman camera + halaman pilih desain.
-Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
-  - const state = { layout, filter, templateId, builtin, shots, visitor:{name,social}, ... }
-  - const TEMPLATES = [...] (payload desain + slots + frame/background_url)
-  - const stripPreview = <canvas> (untuk drawStripPreview)
+ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
+   - const state = { layout, filter, templateId, builtin, shots, visitor:{name,social}, ... }
+   - const TEMPLATES = [...] (payload desain + slots + frame/background_url) -akan diisi dari config-
+   - const stripPreview = <canvas> (untuk drawStripPreview)
 --}}
     // Preload frame overlay & background agar preview langsung tampil saat desain dipilih
     const frameCache = {};
@@ -12,84 +12,81 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
     function invalidateDetected(id) {
         Object.keys(detectedCache).forEach(k => { if (k.startsWith(id + '_')) delete detectedCache[k]; });
     }
-    TEMPLATES.forEach(t => {
-        if (t.frame_url) {
-            const img = new Image();
-            img.onload = () => { frameCache[t.id] = img; invalidateDetected(t.id); if (String(state.templateId) === String(t.id)) drawStripPreview(); };
-            img.onerror = () => { delete frameCache[t.id]; };
-            img.src = t.frame_url;
-        }
-        if (t.transparent_url) {
-            const img = new Image();
-            img.onload = () => { transparentFrameCache[t.id] = img; if (String(state.templateId) === String(t.id)) drawStripPreview(); };
-            img.onerror = () => { delete transparentFrameCache[t.id]; };
-            img.src = t.transparent_url;
-        }
-        if (t.background_url) {
-            const bg = new Image();
-            bg.onload = () => { backgroundCache[t.id] = bg; invalidateDetected(t.id); if (String(state.templateId) === String(t.id)) drawStripPreview(); };
-            bg.onerror = () => { delete backgroundCache[t.id]; };
-            bg.src = t.background_url;
-        }
-    });
 
-    // Ukur otomatis lubang foto pada gambar frame/background (transparan ATAU
-    // kotak putih) untuk template upload-an admin yang belum punya slots.
-    // Murni JS (canvas getImageData), tanpa library. Gagal → null (pakai grid baku).
-    function detectHoles(img, total) {
-        const fw = img.naturalWidth, fh = img.naturalHeight;
-        if (!fw || !fh) return null;
-        if (!Number.isInteger(total / 2) || total < 1) return null;
-        const aw = Math.min(fw, 360);
-        const ah = Math.max(1, Math.round(aw * fh / fw));
-        const cv = document.createElement('canvas');
-        cv.width = aw; cv.height = ah;
-        const cx = cv.getContext('2d', { willReadFrequently: true });
-        cx.drawImage(img, 0, 0, aw, ah);
-        let data;
-        try { data = cx.getImageData(0, 0, aw, ah).data; }
-        catch (e) { return null; }
-        const isHole = (x, y) => {
-            if (x < 0 || y < 0 || x >= aw || y >= ah) return false;
-            const i = (y * aw + x) * 4;
-            if (data[i + 3] < 128) return true;
-            return data[i] >= 215 && data[i + 1] >= 215 && data[i + 2] >= 215; // kotak terang
-        };
-        const holes = [];
-        const minH = ah * 0.07, minW = (aw / 2) * 0.55;
-        [Math.floor(aw / 4), Math.floor(3 * aw / 4)].forEach(px => {
-            const half = px < aw / 2 ? [0, Math.floor(aw / 2)] : [Math.floor(aw / 2), aw];
-            const runs = [];
-            let inRun = false, s = 0;
-            for (let y = 0; y < ah; y++) {
-                const t = isHole(px, y);
-                if (t && !inRun) { inRun = true; s = y; }
-                else if (!t && inRun) { inRun = false; runs.push([s, y]); }
-            }
-            if (inRun) runs.push([s, ah]);
-            runs.forEach(r => {
-                if ((r[1] - r[0]) < minH) return;
-                const ym = Math.floor((r[0] + r[1]) / 2);
-                let l = px; while (l > half[0] && isHole(l - 1, ym)) l--;
-                let rr = px; while (rr < half[1] - 1 && isHole(rr + 1, ym)) rr++;
-                if ((rr - l) < minW) return;
-                const midx = Math.floor((l + rr) / 2);
-                let t = r[0]; while (t > 0 && isHole(midx, t - 1)) t--;
-                let b = r[1]; while (b < ah - 1 && isHole(midx, b + 1)) b++;
-                holes.push([l, t, rr - l, b - t]);
+    // --- MEMUAT TEMPLATES DARI CONFIG FILE ---
+    // TEMPLATS diisi dari template-config.js (satu file JSON/TS dengan definisi semua template)
+    // Setiap template memiliki format:
+    // { id, nama, kategori, frame, thumbnail, canvas: {width, height}, slots: [{x, y, w, h, shape?}] }
+    // - Semua koordinat slot adalah rasio 0-1 terhadap ukuran canvas
+    // - Setiap template memiliki 6 slot (3 kiri + 3 kanan) untuk duplikasi 3 foto ke 2 strip
+    // - Bukan ada variants kiri/kanan/both di config; semua template punya 6 slot satuan
+    // - Urutan: slot 1-3 = kiri, slot 4-6 = kanan (x relatif terhadap canvas 1200 total)
+    // - shape: opsional, untuk slot bentuk (oval, hati, blob, polaroid)
+    // - canvas: ukuran asli frame, TIDAK ADA hardcode di kode render
+    //
+    // Konversi dari format config ke internal yang diinginkan:
+    // - kiri: slots[0..2] dengan x_ratio terhadap canvas kiri (0-600)
+    // - kanan: slots[3..5] dengan x_ratio terhadap canvas kanan (600-1200),
+    //   dimodifikasi dengan offset +600 untuk posisi piksel
+    // - holes dan slots dalam render dikonversi dari rasio ke piksel saat perlu
+
+    // Konversi slot ratio ke format internal per varian
+    function convertConfigSlots(tpl) {
+        if (!tpl || !tpl.slots || tpl.slots.length === 0) return null;
+        const canvasW = tpl.canvas ? (tpl.canvas.width || 1200) : 1200;
+        const canvasH = tpl.canvas ? (tpl.canvas.height || 1800) : 1800;
+        const halfW = canvasW / 2; // 600 px: lebar strip kiri/kanan
+
+        // Setiap template punya 6 slot: 3 kiri + 3 kanan
+        // Kita konversi jadi varian kiri dan kanan
+        const leftSlots = [];
+        const rightSlots = [];
+
+        for (let i = 0; i < 3; i++) {
+            const s = tpl.slots[i]; // slot kiri ke-1, 2, 3
+            if (!s) continue;
+
+            // Konversi ratio ke piksel untuk strip kiri (canvas 600x1800)
+            const xLeft = Math.round(s.x * halfW);
+            const yLeft = Math.round(s.y * canvasH);
+            const wLeft = Math.round(s.w * halfW);
+            const hLeft = Math.round(s.h * canvasH);
+
+            leftSlots.push({
+                x: xLeft, y: yLeft, w: wLeft, h: hLeft,
+                kind: s.shape || 'rect',
+                slot: i + 1, side: 'left'
             });
-        });
-        let kept = holes;
-        if (kept.length > total) {
-            const areas = kept.map(hh => hh[2] * hh[3]).sort((a, b) => a - b);
-            const med = areas[Math.floor(areas.length / 2)];
-            kept = kept.filter(hh => (hh[2] * hh[3]) >= 0.55 * med);
+
+            // Slot kanan: offset x +600, konversi ratio yang sama tapi terhadap kanan
+            const xRight = Math.round(s.x * halfW + halfW);
+            const yRight = Math.round(s.y * canvasH);
+            const wRight = Math.round(s.w * halfW);
+            const hRight = Math.round(s.h * canvasH);
+
+            rightSlots.push({
+                x: xRight, y: yRight, w: wRight, h: hRight,
+                kind: s.shape || 'rect',
+                slot: i + 3, side: 'right' // slot nomor 4,5,6
+            });
         }
-        if (kept.length !== total) return null;
-        kept.sort((a, b) => (a[1] - b[1]) || (a[0] - b[0]));
-        const k = fw / aw;
-        return { fw, fh, holes: kept.map(hh => [Math.round(hh[0] * k), Math.round(hh[1] * k), Math.round(hh[2] * k), Math.round(hh[3] * k)]) };
+
+        if (leftSlots.length === 0 || rightSlots.length === 0) return null;
+
+        return {
+            fw: canvasW, fh: canvasH,
+            holes: [], // tidak digunakan dalam sistem baru; gambar berdasarkan slot directly
+            canvasW: canvasW, canvasH: canvasH,
+            variant: 'gabungan',
+            leftSlots: leftSlots,
+            rightSlots: rightSlots,
+            radius: tpl.slots.length > 0 ? (tpl.slots[0].shape ? 0 : 12) : 12,
+            dupe: true, // selalu dupe dalam sistem baru (6 slot = 2 strip × 3 foto)
+            dupeFactor: 2
+        };
     }
+
+    // --- AKHIR LOAD TEMPLATE DARI CONFIG ---
 
     function selectedTemplate() {
         return TEMPLATES.find(t => String(t.id) === String(state.templateId)) || null;
@@ -103,57 +100,40 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
         'receipt_2x3': { cols: 2, rows: 3, total: 6 }, // 2 strip kembar, tiap strip 1 kolom × 3 foto
     };
 
-    // Foto mengikuti lubang desain (bukan grid baku) bila tersedia:
-    // 1) slots presisi dari database (per varian), 2) hasil ukur otomatis gambarnya.
-    // Varian: 'gabungan' = semua lubang (1200x1800), 'kiri'/'kanan' = 3 lubang
-    // satu strip (600x1800, x digeser untuk kanan).
+    // --- SISTEM SLOT BARU DARI CONFIG ---
+    // Menggunakan konversi slot dari config file
     function slottedTemplate() {
         const tpl = selectedTemplate();
-        if (!tpl || !LAYOUTS[state.layout]) return null;
-        const variant = state.templateVariant || 'gabungan';
-        // Template 2-varian: jumlah lubang mengikuti varian (3 untuk kiri/kanan,
-        // 6 untuk gabungan) — bukan layout kamera. Template lama tetap pakai layout.
-        const total = (tpl.slots && tpl.slots.variants)
-            ? (state.shots && state.shots.length ? state.shots.length : (variant === 'gabungan' ? 6 : 3))
-            : LAYOUTS[state.layout].total;
-        let holes = null, fw = null, fh = null, canvasW = null, canvasH = null;
+        if (!tpl) return null;
 
-        if (tpl.slots && tpl.slots.fw && tpl.slots.fh) {
-            if (tpl.slots.variants && tpl.slots.variants[variant]) {
-                const v = tpl.slots.variants[variant];
-                // v.slots disimpan sebagai RATIO terhadap canvas variant; ubah ke piksel
-                holes = v.slots.map(s => [
-                    Math.round(s.x * v.canvas_w),
-                    Math.round(s.y * v.canvas_h),
-                    Math.round(s.w * v.canvas_w),
-                    Math.round(s.h * v.canvas_h),
-                ]);
-                fw = v.canvas_w; fh = v.canvas_h;
-                canvasW = v.canvas_w; canvasH = v.canvas_h;
-            } else if (Array.isArray(tpl.slots.holes) && tpl.slots.holes.length === total) {
-                holes = tpl.slots.holes;
-                fw = tpl.slots.fw; fh = tpl.slots.fh;
-                canvasW = tpl.slots.fw; canvasH = tpl.slots.fh;
-            }
-        }
-        if (!holes || holes.length !== total) return null;
-        return { fw, fh, holes, canvasW, canvasH, variant,
-                 radius: tpl.slots.radius != null ? tpl.slots.radius : 12,
-                 pad: tpl.slots.pad,
-                 kindMap: (tpl.slots.variants && tpl.slots.variants[variant])
-                    ? Object.fromEntries(v.slots.map(s => [s.slot, s.kind || 'rect']))
-                    : {} };
+        // Konversi slot dari format config ke format internal
+        const converted = convertConfigSlots(tpl);
+        if (!converted) return null;
+
+        // Dalam sistem baru, total selalu 6 slot (3 kiri + 3 kanan)
+        // untuk perilaku duplikasi 3 foto ke 2 strip identik
+        const total = 6;
+
+        // Holes tidak digunakan; kita gunakan leftSlots/rightSlots langsung
+        // dalam paintStrip dan paintVariantDouble
+
+        return {
+            fw: converted.canvasW, fh: converted.canvasH,
+            holes: [], // kosong, akan diganti oleh slot positions di paintStrip
+            canvasW: converted.canvasW, canvasH: converted.canvasH,
+            variant: converted.variant,
+            leftSlots: converted.leftSlots,
+            rightSlots: converted.rightSlots,
+            radius: converted.radius,
+            dupe: converted.dupe,
+            dupeFactor: converted.dupeFactor
+        };
     }
 
     function requiredTotal() {
-        const s = slottedTemplate();
-        if (s) {
-            // Template dengan dupe (mis. Express Yourself): 3 foto diambil,
-            // lalu diduplikasi ke 6 slot (2 strip × 3 foto).
-            if (s.dupe) return s.holes.length / s.dupeFactor;
-            return s.holes.length;
-        }
-        return LAYOUTS[state.layout].total;
+        // Dalam sistem baru: selalu 6 slot (3 kiri + 3 kanan) untuk duplikasi 3 foto
+        // 3 foto diambil, lalu diduplikasi ke 6 slot (2 strip × 3 foto)
+        return 6;
     }
 
     // ===== Mesin gambar strip (dipakai preview & file simpanan) =====
@@ -178,11 +158,12 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
             const k = W / slots.canvasW;
             const hasFrame = !!(selectedTemplate() && selectedTemplate().frame_url);
             const pad = (slots.pad != null) ? slots.pad : (hasFrame ? 2 : 0);
-            const holes = slots.holes.map(h => ({
-                x: (h[0] - pad) * k,
-                y: (h[1] - pad) * k,
-                w: (h[2] + pad * 2) * k,
-                h: (h[3] + pad * 2) * k,
+            // Gunakan leftSlots/rightSlots dari konversi config
+            const holes = slots.leftSlots.concat(slots.rightSlots).map(s => ({
+                x: (s.x - pad) * k,
+                y: (s.y - pad) * k,
+                w: (s.w + pad * 2) * k,
+                h: (s.h + pad * 2) * k,
             }));
             const radius = (slots.radius != null ? slots.radius : 12) * k;
             return { slotted: true, s: k, holes, radius,
@@ -191,9 +172,9 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
                      variant: slots.variant,
                      dupe: !!slots.dupe, dupeFactor: slots.dupeFactor || 1 };
         }
+        // Fallback: layout grid baku
         const s = W / 600;
         if (state.layout === 'receipt' || state.layout === 'receipt_2x3') {
-            // Dua strip struk kembar kiri-kanan; tiap strip 1 kolom × N foto
             const rows = LAYOUTS[state.layout].rows;
             const pad = 16 * s, gutter = 24 * s, ip = 14 * s, gap = 12 * s;
             const colW = (W - pad * 2 - gutter) / 2;
@@ -426,21 +407,30 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
 
         if (useBoth) {
             // Gabungan asli: frame penuh, 6 lubang (3 foto di-duplikasi ke kedua sisi)
-            const v = tpl.slots.variants.gabungan;
-            const holes = v.slots.map(s => [s.x, s.y, s.w, s.h]);
+            // Dalam sistem baru: gunakan slots dari konversi config
+            const v = tpl ? convertConfigSlots(tpl) : null;
+            if (!v) return;
+
+            ctx.drawImage(frOrig, 0, 0, W, H);
+
+            // Gambar 6 slot: 3 kiri + 3 kanan
             const shotIdx = [0, 1, 2, 0, 1, 2];
-            if (frOrig && frOrig.complete && frOrig.naturalWidth) ctx.drawImage(frOrig, 0, 0, W, H);
-            holes.forEach((hole, i) => {
+            // Urutan: slot 1-3 kiri, slot 4-6 kanan
+            const allSlots = [...v.leftSlots, ...v.rightSlots];
+
+            allSlots.forEach((s, i) => {
                 const im = imgs[shotIdx[i]];
                 if (!im) return;
-                drawCover(ctx, im, hole[0] - 2, hole[1] - 2, hole[2] + 4, hole[3] + 4, radius);
+                // Gambar ke posisi slot (sudah dalam koordinat piksel canvas 1200x1800)
+                drawCover(ctx, im, s.x - 2, s.y - 2, s.w + 4, s.h + 4, radius);
             });
+
             if (window.__debug) {
-                holes.forEach((hole, i) => {
+                allSlots.forEach((s, i) => {
                     ctx.save(); ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 2;
-                    ctx.strokeRect(hole[0], hole[1], hole[2], hole[3]);
+                    ctx.strokeRect(s.x, s.y, s.w, s.h);
                     ctx.font = '16px Arial'; ctx.fillStyle = '#ff0000';
-                    ctx.fillText('S' + (shotIdx[i] + 1), hole[0] + 4, hole[1] + 20);
+                    ctx.fillText('S' + (shotIdx[i] + 1), s.x + 4, s.y + 20);
                     ctx.restore();
                 });
             }
@@ -449,8 +439,10 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
         }
 
         // Dupe: duplikasi desain varian (kiri/kanan) ke dua sisi
-        const v = tpl.slots.variants[variant];
+        // Dalam sistem baru: gunakan slots dari konversi config
+        const v = tpl ? convertConfigSlots(tpl) : null;
         if (!v) return;
+
         const sx = variant === 'kanan' ? 600 : 0;
         const drawFrameHalf = (img, dx) => {
             if (img && img.complete && img.naturalWidth) ctx.drawImage(img, sx, 0, 600, 1800, dx, 0, 600, 1800);
@@ -459,19 +451,31 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
         drawFrameHalf(frOrig, 600);
         const shotIdx = [0, 1, 2, 0, 1, 2];
         [0, 600].forEach(dx => {
-            v.slots.forEach((s, j) => {
+            v.leftSlots.forEach((s, j) => {
                 const im = imgs[shotIdx[j]];
+                if (!im) return;
+                drawCover(ctx, im, dx + s.x - 2, s.y - 2, s.w + 4, s.h + 4, radius);
+            });
+            v.rightSlots.forEach((s, j) => {
+                const im = imgs[shotIdx[j + 3]]; // slot 4,5,6 untuk kanan
                 if (!im) return;
                 drawCover(ctx, im, dx + s.x - 2, s.y - 2, s.w + 4, s.h + 4, radius);
             });
         });
         if (window.__debug) {
             [0, 600].forEach(dx => {
-                v.slots.forEach((s, j) => {
+                v.leftSlots.forEach((s, j) => {
                     ctx.save(); ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 2;
                     ctx.strokeRect(dx + s.x, s.y, s.w, s.h);
                     ctx.font = '16px Arial'; ctx.fillStyle = '#ff0000';
                     ctx.fillText('S' + (shotIdx[j] + 1), dx + s.x + 4, s.y + 20);
+                    ctx.restore();
+                });
+                v.rightSlots.forEach((s, j) => {
+                    ctx.save(); ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 2;
+                    ctx.strokeRect(dx + s.x, s.y, s.w, s.h);
+                    ctx.font = '16px Arial'; ctx.fillStyle = '#ff0000';
+                    ctx.fillText('S' + (shotIdx[j + 3] + 1), dx + s.x + 4, s.y + 20);
                     ctx.restore();
                 });
             });
@@ -482,7 +486,7 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
 
     function paintStrip(canvas, W, imgs) {
         const tpl = selectedTemplate();
-        const isVariant = tpl && tpl.slots && tpl.slots.variants && state.builtin !== 'receipt';
+        const isVariant = tpl && tpl.slots && state.builtin !== 'receipt';
         const mode = isVariant ? (state.printMode || 'single') : 'single';
         if (isVariant && (mode === 'dupe' || mode === 'both')) {
             paintVariantDouble(canvas, imgs, mode);
