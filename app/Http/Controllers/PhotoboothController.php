@@ -19,7 +19,7 @@ class PhotoboothController extends Controller
     {
         try {
             // Hanya desain yang layout-nya didukung halaman camera (2x2 / 2x3 / receipt)
-            $templates = Template::whereIn('layout_type', ['2x2', '2x3', 'receipt'])
+            $templates = Template::whereIn('layout_type', ['2x2', '2x3', '1x3', 'receipt', 'receipt_2x3'])
                 ->orderBy('name')
                 ->get();
         } catch (\Throwable $e) {
@@ -28,14 +28,27 @@ class PhotoboothController extends Controller
 
         // Payload JSON untuk pemilih desain di JS (dibuat di controller
         // agar Blade tidak perlu parsing ekspresi kompleks di @json)
-        $designs = $templates->map(fn (Template $t) => [
-            'id' => $t->id,
-            'name' => $t->name,
-            'layout_type' => $t->layout_type,
-            'frame_url' => $t->frame_image ? asset('storage/' . $t->frame_image) : null,
-            'background_url' => $t->background_image ? asset('storage/' . $t->background_image) : null,
-            'slots' => $t->slots,
-        ])->values();
+        $designs = $templates->map(function (Template $t) {
+            $frameUrl = $t->frame_image ? asset('storage/' . $t->frame_image) : null;
+            // Frame transparan (slot = alpha 0) jika ada, untuk digambar paling atas
+            $transparentUrl = null;
+            if ($t->frame_image) {
+                $base = basename($t->frame_image);
+                $transparent = 'frames/' . preg_replace('/\.png$/i', '-transparent.png', $base);
+                if (file_exists(storage_path('app/public/' . $transparent))) {
+                    $transparentUrl = asset('storage/' . $transparent);
+                }
+            }
+            return [
+                'id' => $t->id,
+                'name' => $t->name,
+                'layout_type' => $t->layout_type,
+                'frame_url' => $frameUrl,
+                'transparent_url' => $transparentUrl,
+                'background_url' => $t->background_image ? asset('storage/' . $t->background_image) : null,
+                'slots' => $t->slots,
+            ];
+        })->values();
 
         return [$templates, $designs];
     }

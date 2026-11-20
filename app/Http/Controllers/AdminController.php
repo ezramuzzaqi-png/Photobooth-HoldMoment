@@ -99,7 +99,7 @@ class AdminController extends Controller
     {
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'layout_type' => ['required', 'in:2x2,2x3,receipt,strip_1x4,1x4'],
+            'layout_type' => ['required', 'in:2x2,2x3,1x3,receipt,strip_1x4,1x4'],
             'frame_image' => ['nullable', 'image', 'mimes:png,jpg,jpeg', 'max:4096'],
             'background_image' => ['nullable', 'image', 'mimes:png,jpg,jpeg', 'max:4096'],
         ]);
@@ -142,7 +142,7 @@ class AdminController extends Controller
 
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'layout_type' => ['required', 'in:2x2,2x3,receipt,strip_1x4,1x4'],
+            'layout_type' => ['required', 'in:2x2,2x3,1x3,receipt,strip_1x4,1x4'],
             'frame_image' => ['nullable', 'image', 'mimes:png,jpg,jpeg', 'max:4096'],
             'background_image' => ['nullable', 'image', 'mimes:png,jpg,jpeg', 'max:4096'],
             'clear_frame' => ['nullable', 'boolean'],

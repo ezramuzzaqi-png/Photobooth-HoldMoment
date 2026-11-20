@@ -89,7 +89,63 @@ class DatabaseSeeder extends Seeder
             );
         }
 
+        // ===== 10 template Aesthetic (frame 1200x1800, 2 desain berdampingan) =====
+        // Daftarkan tiap sisi (kiri/kanan) sebagai template terpisah -> 20 template total.
+        // Setiap template mengikuti pola Express Yourself: 6 lubang (3 kiri + 3 kanan),
+        // dupe=>true/dupeFactor=>2 -> 3 foto unik yang diduplikasi ke 6 slot (2 strip).
+        // Output: 1200x1800 (dua strip sama) atau 600x1800 (satu strip).
+        // Setiap file frame berisi 2 desain (kiri 0-600, kanan 600-1200).
+        // Template kiri/dikenali sebagai "Nama (Kiri)" dan "Nama (Kanan)" dipilih di menu.
+        $aestheticFrames = [
+            'denim', 'lace-brown', 'pink-plaid', 'movie-ticket',
+            'music-player', 'green-smile', 'pinky-promise', 'red-hearts',
+            'blue-growing', 'receipt',
+        ];
+        foreach ($aestheticFrames as $af) {
+            $keyMap = [
+                'denim' => 'denim', 'lace-brown' => 'lace-brown', 'pink-plaid' => 'pink-plaid',
+                'movie-ticket' => 'movie-ticket', 'music-player' => 'music-player',
+                'green-smile' => 'green-smile', 'pinky-promise' => 'pinky-promise',
+                'red-hearts' => 'red-hearts', 'blue-growing' => 'blue-growing', 'receipt' => 'receipt',
+            ];
+            $key = $keyMap[$af];
+
+            $cfgPath = database_path("seeders/assets/frames-config/{$af}-slots.json");
+            if (! is_file($cfgPath) || ! Storage::disk('public')->exists("frames/{$af}.png")) {
+                continue;
+            }
+            $cfg = json_decode(file_get_contents($cfgPath), true);
+            $leftSlots = $cfg['variants']['left']['slots'];
+            $rightSlots = $cfg['variants']['right']['slots'];
+
+            // Bangun holes array: 6 lubang, 3 kiri + 3 kanan (seperti Express Yourself),
+            // dengan urutan: kiri atas, kanan atas, kiri tengah, kanan tengah, kiri bawah, kanan bawah.
+            $holes = array_merge(
+                // 3 lubang kiri (dari variant kiri config)
+                array_map(function($s) { return [$s['est_px'][0], $s['est_px'][1], $s['est_px'][2], $s['est_px'][3]]; }, $leftSlots),
+                // 3 lubang kanan (dari variant kanan config, offset sudah termasuk di est_px)
+                array_map(function($s) { return [$s['est_px'][0], $s['est_px'][1], $s['est_px'][2], $s['est_px'][3]]; }, $rightSlots)
+            );
+
+            $templateLeftName = $af . ' (Kiri)';
+            $templateRightName = $af . ' (Kanan)';
+
+            // Template kiri
+            Template::firstOrCreate(
+                ['name' => $templateLeftName],
+                ['layout_type' => '2x3', 'frame_image' => "frames/{$af}.png",
+                 'slots' => ['fw' => 1200, 'fh' => 1800, 'radius' => 0, 'pad' => 0,
+                              'dupe' => true, 'dupeFactor' => 2, 'holes' => $holes]]
+            );
+            // Template kanan
+            Template::firstOrCreate(
+                ['name' => $templateRightName],
+                ['layout_type' => '2x3', 'frame_image' => "frames/{$af}.png",
+                 'slots' => ['fw' => 1200, 'fh' => 1800, 'radius' => 0, 'pad' => 0,
+                              'dupe' => true, 'dupeFactor' => 2, 'holes' => $holes]]
+            );
+        }
+
         $this->call(FrameTemplateSeeder::class);
-        $this->call(BackgroundSlotsSeeder::class);
     }
 }

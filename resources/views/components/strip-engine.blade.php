@@ -6,6 +6,7 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
 --}}
     // Preload frame overlay & background agar preview langsung tampil saat desain dipilih
     const frameCache = {};
+    const transparentFrameCache = {}; // versi transparan (slot = alpha 0), digambar paling atas
     const backgroundCache = {};
     const detectedCache = {}; // hasil ukur otomatis lubang per template (kunci: id_total)
     function invalidateDetected(id) {
@@ -17,6 +18,12 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
             img.onload = () => { frameCache[t.id] = img; invalidateDetected(t.id); if (String(state.templateId) === String(t.id)) drawStripPreview(); };
             img.onerror = () => { delete frameCache[t.id]; };
             img.src = t.frame_url;
+        }
+        if (t.transparent_url) {
+            const img = new Image();
+            img.onload = () => { transparentFrameCache[t.id] = img; if (String(state.templateId) === String(t.id)) drawStripPreview(); };
+            img.onerror = () => { delete transparentFrameCache[t.id]; };
+            img.src = t.transparent_url;
         }
         if (t.background_url) {
             const bg = new Image();
@@ -91,30 +98,62 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
     const LAYOUTS = {
         '2x2': { cols: 2, rows: 2, total: 4 },
         '2x3': { cols: 2, rows: 3, total: 6 },
+        '1x3': { cols: 1, rows: 3, total: 3 }, // satu strip 3 foto (template 2-varian)
         'receipt': { cols: 2, rows: 2, total: 4 }, // 2 strip kembar, tiap strip 1 kolom × 2 foto
         'receipt_2x3': { cols: 2, rows: 3, total: 6 }, // 2 strip kembar, tiap strip 1 kolom × 3 foto
     };
 
     // Foto mengikuti lubang desain (bukan grid baku) bila tersedia:
-    // 1) slots presisi dari database, 2) hasil ukur otomatis gambarnya.
-    // Syarat: jumlah lubang harus sama dengan total slot layout aktif.
+    // 1) slots presisi dari database (per varian), 2) hasil ukur otomatis gambarnya.
+    // Varian: 'gabungan' = semua lubang (1200x1800), 'kiri'/'kanan' = 3 lubang
+    // satu strip (600x1800, x digeser untuk kanan).
     function slottedTemplate() {
         const tpl = selectedTemplate();
         if (!tpl || !LAYOUTS[state.layout]) return null;
-        const total = LAYOUTS[state.layout].total;
-        if (tpl.slots && Array.isArray(tpl.slots.holes) && tpl.slots.fw && tpl.slots.fh
-            && tpl.slots.holes.length === total) return tpl.slots;
-        const key = tpl.id + '_' + total;
-        if (!(key in detectedCache)) {
-            const img = (tpl.frame_url && frameCache[tpl.id]) || (tpl.background_url && backgroundCache[tpl.id]) || null;
-            detectedCache[key] = (img && img.complete && img.naturalWidth) ? detectHoles(img, total) : null;
+        const variant = state.templateVariant || 'gabungan';
+        // Template 2-varian: jumlah lubang mengikuti varian (3 untuk kiri/kanan,
+        // 6 untuk gabungan) — bukan layout kamera. Template lama tetap pakai layout.
+        const total = (tpl.slots && tpl.slots.variants)
+            ? (state.shots && state.shots.length ? state.shots.length : (variant === 'gabungan' ? 6 : 3))
+            : LAYOUTS[state.layout].total;
+        let holes = null, fw = null, fh = null, canvasW = null, canvasH = null;
+
+        if (tpl.slots && tpl.slots.fw && tpl.slots.fh) {
+            if (tpl.slots.variants && tpl.slots.variants[variant]) {
+                const v = tpl.slots.variants[variant];
+                // v.slots disimpan sebagai RATIO terhadap canvas variant; ubah ke piksel
+                holes = v.slots.map(s => [
+                    Math.round(s.x * v.canvas_w),
+                    Math.round(s.y * v.canvas_h),
+                    Math.round(s.w * v.canvas_w),
+                    Math.round(s.h * v.canvas_h),
+                ]);
+                fw = v.canvas_w; fh = v.canvas_h;
+                canvasW = v.canvas_w; canvasH = v.canvas_h;
+            } else if (Array.isArray(tpl.slots.holes) && tpl.slots.holes.length === total) {
+                holes = tpl.slots.holes;
+                fw = tpl.slots.fw; fh = tpl.slots.fh;
+                canvasW = tpl.slots.fw; canvasH = tpl.slots.fh;
+            }
         }
-        return detectedCache[key];
+        if (!holes || holes.length !== total) return null;
+        return { fw, fh, holes, canvasW, canvasH, variant,
+                 radius: tpl.slots.radius != null ? tpl.slots.radius : 12,
+                 pad: tpl.slots.pad,
+                 kindMap: (tpl.slots.variants && tpl.slots.variants[variant])
+                    ? Object.fromEntries(v.slots.map(s => [s.slot, s.kind || 'rect']))
+                    : {} };
     }
 
     function requiredTotal() {
         const s = slottedTemplate();
-        return s ? s.holes.length : LAYOUTS[state.layout].total;
+        if (s) {
+            // Template dengan dupe (mis. Express Yourself): 3 foto diambil,
+            // lalu diduplikasi ke 6 slot (2 strip × 3 foto).
+            if (s.dupe) return s.holes.length / s.dupeFactor;
+            return s.holes.length;
+        }
+        return LAYOUTS[state.layout].total;
     }
 
     // ===== Mesin gambar strip (dipakai preview & file simpanan) =====
@@ -133,24 +172,24 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
     function geomFor(W) {
         const slots = slottedTemplate();
         if (slots) {
-            // Kanvas mengikuti rasio asli frame (1200x1800) agar overlay
-            // tidak melar. Foto sedikit DILEBARKAN (+3px) bila ada frame
-            // overlay di atasnya (tepi terselip di bawah bingkai), tapi
-            // DIKECILKAN (-3px) bila tanpa frame agar tidak menutupi
-            // border milik desain background.
-            const k = W / slots.fw;
+            // Canvas mengikuti rasio asli canvas varian (tidak melar).
+            // Frame transparan ada di atas, jadi foto di-bleed +2px agar tepi
+            // lubang tertutup (hindari garis tipis di sekitar slot berbentuk).
+            const k = W / slots.canvasW;
             const hasFrame = !!(selectedTemplate() && selectedTemplate().frame_url);
-            const pad = hasFrame ? 3 : -3;
+            const pad = (slots.pad != null) ? slots.pad : (hasFrame ? 2 : 0);
             const holes = slots.holes.map(h => ({
                 x: (h[0] - pad) * k,
                 y: (h[1] - pad) * k,
                 w: (h[2] + pad * 2) * k,
                 h: (h[3] + pad * 2) * k,
             }));
-            // radius sudut mengikuti lubang desain (px frame → px kanvas);
-            // hasil ukur otomatis (tanpa radius) pakai default 12px frame.
             const radius = (slots.radius != null ? slots.radius : 12) * k;
-            return { slotted: true, s: k, holes, radius, H: slots.fh * k };
+            return { slotted: true, s: k, holes, radius,
+                     H: slots.canvasH * k,
+                     canvasW: slots.canvasW, canvasH: slots.canvasH,
+                     variant: slots.variant,
+                     dupe: !!slots.dupe, dupeFactor: slots.dupeFactor || 1 };
         }
         const s = W / 600;
         if (state.layout === 'receipt' || state.layout === 'receipt_2x3') {
@@ -251,17 +290,43 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
         ctx.fillText('• • •  PHOTOSTRIP  • • •', cx, 80 * s);
     }
 
-    // Satu foto cover-fit ke sel
+    // Satu foto cover-fit ke sel.
+    // Jika orientasi foto tidak cocok dengan lubang (mis. foto portrait di lubang landscape),
+    // putar foto terlebih dahulu agar wajah tidak terpotong oleh cover-fit.
     function drawCover(ctx, im, x, y, w, h, r) {
         const ir = im.width / im.height, cr = w / h;
+        const imageIsLandscape = im.width >= im.height;
+        const holeIsLandscape = w >= h;
+        let src = im;
+        let srcW = im.width, srcH = im.height;
+        if (imageIsLandscape !== holeIsLandscape) {
+            const rot = document.createElement('canvas');
+            rot.width = im.height;
+            rot.height = im.width;
+            const rctx = rot.getContext('2d');
+            if (!imageIsLandscape) {
+                // Foto portrait → lubang landscape: putar 90° searah jarum jam
+                rctx.translate(im.height, 0);
+                rctx.rotate(Math.PI / 2);
+            } else {
+                // Foto landscape → lubang portrait: putar 90° berlawanan jarum jam
+                rctx.rotate(-Math.PI / 2);
+                rctx.translate(0, -im.width);
+            }
+            rctx.drawImage(im, 0, 0);
+            src = rot;
+            srcW = im.height;
+            srcH = im.width;
+        }
         let sw, sh, sx, sy;
-        if (ir > cr) { sh = im.height; sw = sh * cr; sx = (im.width - sw) / 2; sy = 0; }
-        else { sw = im.width; sh = sw / cr; sx = 0; sy = (im.height - sh) / 2; }
+        const nir = srcW / srcH;
+        if (nir > cr) { sh = srcH; sw = sh * cr; sx = (srcW - sw) / 2; sy = 0; }
+        else { sw = srcW; sh = sw / cr; sx = 0; sy = (srcH - sh) / 2; }
         ctx.save();
         ctx.beginPath();
         ctx.roundRect(x, y, w, h, r);
         ctx.clip();
-        ctx.drawImage(im, sx, sy, sw, sh, x, y, w, h);
+        ctx.drawImage(src, sx, sy, sw, sh, x, y, w, h);
         ctx.restore();
     }
 
@@ -327,37 +392,139 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
         ctx.fillText((state.visitor.social || '@sosmed') + '  •  ' + new Date().toLocaleDateString('id-ID'), cx, H - 30 * s);
     }
 
-    // Frame PNG upload-an admin (digambar paling atas bila ada & cocok)
-    function paintFrameOverlay(ctx, W, H) {
-        const fr = state.templateId ? frameCache[state.templateId] : null;
+    // Frame overlay (digambar paling atas). useTransparent=true pakai versi
+    // transparan (slot = alpha 0) sehingga dekorasi tetap di atas foto.
+    function paintFrameOverlay(ctx, W, H, useTransparent = false) {
+        const tpl = state.templateId ? selectedTemplate() : null;
+        let fr = state.templateId ? frameCache[state.templateId] : null;
+        // Pakai versi transparan hanya jika tersedia; template lama yang file
+        // frame-nya sudah transparan tetap memakai frameCache (fallback aman).
+        if (useTransparent && tpl && tpl.transparent_url && transparentFrameCache[state.templateId]) {
+            fr = transparentFrameCache[state.templateId];
+        }
         if (fr && fr.complete && fr.naturalWidth) {
             ctx.drawImage(fr, 0, 0, W, H);
         }
     }
 
+    // Render khusus template 2-varian untuk mode 'dupe' (duplikasi satu varian)
+    // dan 'both' (gabungan asli kiri A + kanan B). Selalu menghasilkan 1200x1800.
+    function paintVariantDouble(canvas, imgs, mode) {
+        const tpl = selectedTemplate();
+        const variant = state.templateVariant || 'gabungan';
+        const W = 1200, H = 1800;
+        canvas.width = W;
+        canvas.height = H;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#1C1917';
+        ctx.fillRect(0, 0, W, H);
+
+        const useBoth = (mode === 'both' || variant === 'gabungan');
+        const frOrig = tpl ? frameCache[tpl.id] : null;
+        const frTrans = tpl ? transparentFrameCache[tpl.id] : null;
+        const radius = ((tpl.slots && tpl.slots.radius) || 3);
+
+        if (useBoth) {
+            // Gabungan asli: frame penuh, 6 lubang (3 foto di-duplikasi ke kedua sisi)
+            const v = tpl.slots.variants.gabungan;
+            const holes = v.slots.map(s => [s.x, s.y, s.w, s.h]);
+            const shotIdx = [0, 1, 2, 0, 1, 2];
+            if (frOrig && frOrig.complete && frOrig.naturalWidth) ctx.drawImage(frOrig, 0, 0, W, H);
+            holes.forEach((hole, i) => {
+                const im = imgs[shotIdx[i]];
+                if (!im) return;
+                drawCover(ctx, im, hole[0] - 2, hole[1] - 2, hole[2] + 4, hole[3] + 4, radius);
+            });
+            if (window.__debug) {
+                holes.forEach((hole, i) => {
+                    ctx.save(); ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 2;
+                    ctx.strokeRect(hole[0], hole[1], hole[2], hole[3]);
+                    ctx.font = '16px Arial'; ctx.fillStyle = '#ff0000';
+                    ctx.fillText('S' + (shotIdx[i] + 1), hole[0] + 4, hole[1] + 20);
+                    ctx.restore();
+                });
+            }
+            if (frTrans && frTrans.complete && frTrans.naturalWidth) ctx.drawImage(frTrans, 0, 0, W, H);
+            return;
+        }
+
+        // Dupe: duplikasi desain varian (kiri/kanan) ke dua sisi
+        const v = tpl.slots.variants[variant];
+        if (!v) return;
+        const sx = variant === 'kanan' ? 600 : 0;
+        const drawFrameHalf = (img, dx) => {
+            if (img && img.complete && img.naturalWidth) ctx.drawImage(img, sx, 0, 600, 1800, dx, 0, 600, 1800);
+        };
+        drawFrameHalf(frOrig, 0);
+        drawFrameHalf(frOrig, 600);
+        const shotIdx = [0, 1, 2, 0, 1, 2];
+        [0, 600].forEach(dx => {
+            v.slots.forEach((s, j) => {
+                const im = imgs[shotIdx[j]];
+                if (!im) return;
+                drawCover(ctx, im, dx + s.x - 2, s.y - 2, s.w + 4, s.h + 4, radius);
+            });
+        });
+        if (window.__debug) {
+            [0, 600].forEach(dx => {
+                v.slots.forEach((s, j) => {
+                    ctx.save(); ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 2;
+                    ctx.strokeRect(dx + s.x, s.y, s.w, s.h);
+                    ctx.font = '16px Arial'; ctx.fillStyle = '#ff0000';
+                    ctx.fillText('S' + (shotIdx[j] + 1), dx + s.x + 4, s.y + 20);
+                    ctx.restore();
+                });
+            });
+        }
+        drawFrameHalf(frTrans, 0);
+        drawFrameHalf(frTrans, 600);
+    }
+
     function paintStrip(canvas, W, imgs) {
+        const tpl = selectedTemplate();
+        const isVariant = tpl && tpl.slots && tpl.slots.variants && state.builtin !== 'receipt';
+        const mode = isVariant ? (state.printMode || 'single') : 'single';
+        if (isVariant && (mode === 'dupe' || mode === 'both')) {
+            paintVariantDouble(canvas, imgs, mode);
+            return;
+        }
         const g = geomFor(W);
         canvas.width = W;
         canvas.height = g.H;
         const ctx = canvas.getContext('2d');
         if (g.slotted) {
-            // Background digambar utuh mengikuti rasio aslinya (tidak melar);
-            // frame transparan menutupi penuh kecuali lubang; keduanya opsional.
-            // Tiap foto digambar tepat di lubangnya (milik background kotak
-            // putih/hitam maupun lubang transparan frame).
-            const bg = state.templateId ? backgroundCache[state.templateId] : null;
+            // Background = frame asli (menunjukkan dekorasi di area non-slot).
+            // Foto digambar di lubang slot. Frame transparan digambar PALING ATAS
+            // (slot-nya alpha 0 → foto kelihatan; dekorasi/bintang/klip di atas foto).
+            const bg = state.templateId ? frameCache[state.templateId] : null;
             if (bg && bg.complete && bg.naturalWidth) {
                 ctx.drawImage(bg, 0, 0, W, g.H);
             } else {
                 ctx.fillStyle = '#1C1917';
                 ctx.fillRect(0, 0, W, g.H);
             }
-            imgs.forEach((im, i) => {
-                const hole = g.holes[i];
+            g.holes.forEach((hole, i) => {
+                // Dupe template (mis. Express Yourself): 3 foto diduplikasi ke 6 slot.
+                const sourceIdx = g.dupe ? Math.floor(i / g.dupeFactor) : i;
+                const im = imgs[sourceIdx];
                 if (!im || !hole) return;
                 drawCover(ctx, im, hole.x, hole.y, hole.w, hole.h, g.radius);
             });
-            paintFrameOverlay(ctx, W, g.H);
+            // Debug: kotak merah tipis di bounding box tiap slot (?debug=1)
+            if (window.__debug) {
+                g.holes.forEach((hole, i) => {
+                    ctx.save();
+                    ctx.strokeStyle = '#ff0000';
+                    ctx.lineWidth = Math.max(1, 2 * g.s);
+                    ctx.strokeRect(hole.x, hole.y, hole.w, hole.h);
+                    ctx.font = Math.max(12, 16 * g.s) + 'px Arial';
+                    ctx.fillStyle = '#ff0000';
+                    ctx.fillText('S' + (i + 1), hole.x + 4, hole.y + Math.max(14, 24 * g.s));
+                    ctx.restore();
+                });
+            }
+            // Frame transparan paling atas: dekorasi di atas foto, slot tetap lubang.
+            paintFrameOverlay(ctx, W, g.H, true);
             return;
         }
         const bg = state.templateId ? backgroundCache[state.templateId] : null;
@@ -388,10 +555,12 @@ Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
     }
 
     function fullResStrip() {
-        // 900px + JPEG 0.75 → ~400KB, aman untuk Railway (limit 4MB)
+        // Resolusi asli: 600x1800 (satu strip) atau 1200x1800 (dua strip).
         return Promise.all(state.shots.map(loadShot)).then((imgs) => {
             const cv = document.createElement('canvas');
-            paintStrip(cv, 900, imgs);
-            return cv.toDataURL('image/jpeg', 0.75);
+            const s = slottedTemplate();
+            const W = s ? s.canvasW : 900;
+            paintStrip(cv, W, imgs);
+            return cv.toDataURL('image/jpeg', 0.85);
         });
     }
