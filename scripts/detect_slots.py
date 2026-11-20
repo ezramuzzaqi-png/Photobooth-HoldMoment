@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Deteksi slot + buat versi frame transparan.
 
@@ -53,9 +52,36 @@ FILES = [
     {"src": "IMG_7010.PNG", "name": "Receipt",          "key": "receipt",
      "left":  ["rect", "rect", "rect"],
      "right": ["rect", "rect", "rect"]},
+    {"src": "1.png", "name": "Template-1",              "key": "template-1",
+     "left":  ["rect", "rect", "rect"],
+     "right": ["rect", "rect", "rect"]},
+    {"src": "5.png", "name": "Template-5",              "key": "template-5",
+     "left":  ["rect", "rect", "rect"],
+     "right": ["rect", "rect", "rect"]},
+    {"src": "6.png", "name": "Template-6",              "key": "template-6",
+     "left":  ["rect", "rect", "rect"],
+     "right": ["rect", "rect", "rect"]},
+    {"src": "7.png", "name": "Template-7",              "key": "template-7",
+     "left":  ["rect", "rect", "rect"],
+     "right": ["rect", "rect", "rect"]},
+    {"src": "8.png", "name": "Template-8",              "key": "template-8",
+     "left":  ["rect", "rect", "rect"],
+     "right": ["rect", "rect", "rect"]},
 ]
 
 EST = {
+
+    "template-1":  {"left":  [(100,200,500,400),(100,600,500,400),(100,1000,500,400)],
+                        "right": [(600,200,500,400),(600,600,500,400),(600,1000,500,400)]},
+    "template-5":  {"left":  [(120,200,500,400),(120,600,500,400),(120,1000,500,400)],
+                        "right": [(700,200,500,400),(700,600,500,400),(700,1000,500,400)]},
+    "template-6":  {"left":  [(110,200,500,400),(110,600,500,400),(110,1000,500,400)],
+                        "right": [(690,200,500,400),(690,600,500,400),(690,1000,500,400)]},
+    "template-7":  {"left":  [(105,200,500,400),(105,600,500,400),(105,1000,500,400)],
+                        "right": [(695,200,500,400),(695,600,500,400),(695,1000,500,400)]},
+    "template-8":  {"left":  [(115,200,500,400),(115,600,500,400),(115,1000,500,400)],
+                        "right": [(705,200,500,400),(705,600,500,400),(705,1000,500,400)]},
+
     "denim":           {"left":  [(85,230,430,320),(85,670,430,320),(85,1115,430,320)],
                         "right": [(685,230,430,320),(685,670,430,320),(685,1115,430,320)]},
     "lace-brown":      {"left":  [(70,180,460,410),(70,637,460,411),(70,1095,460,410)],
@@ -72,10 +98,7 @@ EST = {
                         "right": [(671,215,481,416),(671,655,481,416),(671,1093,481,416)]},
     "red-hearts":      {"left":  [(62,300,468,355),(62,735,468,355),(62,1170,468,355)],
                         "right": [(671,223,457,418),(671,691,457,418),(671,1158,457,418)]},
-    "blue-growing":    {"left":  [(62,177,487,398),(62,608,487,398),(62,1038,487,398)],
-                        "right": [(656,392,488,398),(656,822,488,398),(656,1252,488,398)]},
-    "receipt":         {"left":  [(45,390,510,330),(45,748,510,329),(45,1105,510,330)],
-                        "right": [(646,390,508,330),(646,748,508,329),(646,1105,508,330)]},
+    "blue-growing":    {"left":  [(62,177,487,398),(62,608,487,398),(62,1038,487,398)]},
 }
 
 def is_transparent(px, thr=30):
@@ -137,8 +160,6 @@ def process_file(finfo):
     shutil.copyfile(src, dst_orig)
     print(f"  frame asli -> {dst_orig}")
 
-    # Versi transparan dibuat di akhir dengan dilasi area transparan asli
-    # (lihat blok "Terapkan hole_mask" di bawah) — tidak dengan kotak persegi.
     trans = img.copy()
 
     for side in ("left", "right"):
@@ -147,7 +168,7 @@ def process_file(finfo):
         holes_out = []
         for i, kind in enumerate(finfo[side]):
             est = EST[finfo["key"]][side][i]
-            est_full = (est[0], est[1], est[2], est[3])  # koordinat frame penuh 1200 px
+            est_full = (est[0], est[1], est[2], est[3])
 
             bb = None; points = set()
             if kind in ("rect",):
@@ -182,26 +203,14 @@ def process_file(finfo):
                 points = set()
                 print(f"  [{side}] slot {i+1} ({kind}): GAGAL, pakai EST {est_full}")
 
-            mask_info = None
-            if kind in ("oval", "heart", "blob", "polaroid") and points:
-                mask = make_mask(points, bb)
-                mname = f"{finfo['key']}-{side}-s{i+1}-mask.png"
-                mask.save(os.path.join(OUT_DIR, mname))
-                mask_info = {"mask_file": mname, "mask_bbox_px": list(bb)}
-
             # Slot untuk canvas varian (geser x untuk kanan)
             bb_shifted = (bb[0] - x_shift, bb[1], bb[2], bb[3])
-            mask_bbox_shifted = None
-            if mask_info:
-                mb = list(mask_info["mask_bbox_px"])
-                mask_bbox_shifted = [mb[0] - x_shift, mb[1], mb[2], mb[3]]
+            print(f"  [{side}] slot {i+1}: bbox_shifted={bb_shifted}")
 
             slots_out.append({
                 "x": round(bb_shifted[0] / (W // 2), 6), "y": round(bb_shifted[1] / H, 6),
                 "w": round(bb_shifted[2] / (W // 2), 6), "h": round(bb_shifted[3] / H, 6),
                 "kind": kind, "side": side, "slot": i + 1,
-                "est_px": list(est_full), "bbox_px": list(bb_shifted),
-                **({"mask": {**mask_info, "mask_bbox_px": mask_bbox_shifted}} if mask_info else {}),
             })
             holes_out.append([bb_shifted[0], bb_shifted[1], bb_shifted[2], bb_shifted[3]])
 
@@ -218,10 +227,6 @@ def process_file(finfo):
         s2 = dict(s)
         s2["x"] = round(s["x"] / 2, 6)
         s2["w"] = round(s["w"] / 2, 6)
-        s2["bbox_px"] = [s["bbox_px"][0], s["bbox_px"][1], s["bbox_px"][2], s["bbox_px"][3]]
-        if s2.get("mask") and s2["mask"].get("mask_bbox_px"):
-            mb = s2["mask"]["mask_bbox_px"]
-            s2["mask"]["mask_bbox_px"] = [mb[0], mb[1], mb[2], mb[3]]
         both_slots.append(s2)
     for h in result["variants"]["left"]["holes_px"]:
         both_holes.append(list(h))
@@ -229,10 +234,6 @@ def process_file(finfo):
         s2 = dict(s)
         s2["x"] = round(0.5 + s["x"] / 2, 6)
         s2["w"] = round(s["w"] / 2, 6)
-        s2["bbox_px"] = [s["bbox_px"][0] + 600, s["bbox_px"][1], s["bbox_px"][2], s["bbox_px"][3]]
-        if s2.get("mask") and s2["mask"].get("mask_bbox_px"):
-            mb = s2["mask"]["mask_bbox_px"]
-            s2["mask"]["mask_bbox_px"] = [mb[0] + 600, mb[1], mb[2], mb[3]]
         both_slots.append(s2)
     for h in result["variants"]["right"]["holes_px"]:
         both_holes.append([h[0] + 600, h[1], h[2], h[3]])

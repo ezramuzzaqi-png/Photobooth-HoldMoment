@@ -92,6 +92,50 @@
         return TEMPLATES.find(t => String(t.id) === String(state.templateId)) || null;
     }
 
+    // Fungsi: dapatkan template dari config (baca dari state.cfgId)
+    function selectedCfg() {
+        if (state.cfgId) {
+            return window.CFG_TEMPLATES.find(t => String(t.id) === String(state.cfgId)) || null;
+        }
+        return null;
+    }
+
+    // Mesin gambar strip menggunakan template dari config (layout 1x3 single strip)
+    function paintCfgStrip(canvas, W, imgs, cfgTpl) {
+        const k = W / cfgTpl.canvas.width;
+        const ctx = canvas.getContext('2d');
+        // Gambar frame sebagai background
+        const frameImg = new Image();
+        frameImg.src = cfgTpl.frame;
+        frameImg.onload = () => {
+            canvas.width = W;
+            canvas.height = cfgTpl.canvas.height;
+            ctx.drawImage(frameImg, 0, 0, cfgTpl.canvas.width, cfgTpl.canvas.height);
+            // Gambar setiap slot sebagai area transparan dan tempat foto
+            cfgTpl.slots.forEach((s, i) => {
+                const x = s.x * k;
+                const y = s.y * k;
+                const w = s.w * k;
+                const h = s.h * k;
+                // Gambar shot ke slot area
+                if (imgs && imgs[i]) {
+                    ctx.drawImage(imgs[i], x, y, w, h);
+                }
+            });
+            // Draw slot borders untuk visualisasi
+            ctx.strokeStyle = 'rgba(255,0,0,0.5)';
+            ctx.lineWidth = 1;
+            cfgTpl.slots.forEach(s => {
+                const X = s.x * k;
+                const Y = s.y * k;
+                const W2 = s.w * k;
+                const H2 = s.h * k;
+                ctx.strokeRect(X - 2, Y - 2, W2 + 4, H2 + 4);
+            });
+        };
+        frameImg.onerror = () => paintStrip(canvas, W, imgs);
+    }
+
     const LAYOUTS = {
         '2x2': { cols: 2, rows: 2, total: 4 },
         '2x3': { cols: 2, rows: 3, total: 6 },
@@ -485,6 +529,8 @@
     }
 
     function paintStrip(canvas, W, imgs) {
+        const cfgTpl = selectedCfg();
+        if (cfgTpl) { paintCfgStrip(canvas, W, imgs, cfgTpl); return; }
         const tpl = selectedTemplate();
         const isVariant = tpl && tpl.slots && state.builtin !== 'receipt';
         const mode = isVariant ? (state.printMode || 'single') : 'single';
