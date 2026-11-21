@@ -104,7 +104,6 @@
 </section>
 
 @push('scripts')
-<script src="{{ asset('js/template-config.js') }}"></script>
 <script>
 (function () {
     // Ambil titipan dari /camera; tanpa itu kembali ke camera.
@@ -116,7 +115,7 @@
         return;
     }
 
-    const TEMPLATES = window.CFG_TEMPLATES;
+    const TEMPLATES = @json($designs);
     const stripPreview = document.getElementById('stripPreview');
     const previewLayoutBadge = document.getElementById('previewLayoutBadge');
     const previewDesignLabel = document.getElementById('previewDesignLabel');
@@ -140,21 +139,6 @@
 
     @include('components.strip-engine')
 
-    const cfgList = document.getElementById('designListDesain');
-    CFG_TEMPLATES.forEach(t => {
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.dataset.cfg = t.id;
-        b.setAttribute('role', 'radio');
-        b.setAttribute('aria-checked', 'false');
-        b.className = 'design-card relative rounded-xl border border-brand-line-strong overflow-hidden text-left transition hover:border-brand-orange/50 hover:shadow-card';
-        b.innerHTML = '<span class="tick hidden absolute top-2 right-2 z-10 w-6 h-6 rounded-full bg-brand-orange text-white flex items-center justify-center shadow">✓</span>'
-            + '<img src="{{ asset('storage/') }}' + t.thumbnail + '" alt="' + t.nama + '" class="block h-28 w-full object-contain bg-brand-card-light">'
-            + '<span class="block p-2.5 bg-white"><span class="block text-sm font-bold leading-tight">' + t.nama + '</span>'
-            + '<span class="inline-block mt-1 text-[10px] font-bold bg-brand-card-light rounded-full px-2 py-0.5">1x3</span></span>';
-        cfgList.appendChild(b);
-    });
-
     // Hanya desain yang cocok dengan jumlah foto: template seformat,
     // Polos selalu, Receipt khusus 4 foto (butuh 2x2 kembar prosedural).
     // Saat mode receipt, daftar tetap memakai format asal (BASE_LAYOUT) agar
@@ -165,9 +149,7 @@
         document.querySelectorAll('.design-card').forEach(b => {
             let show = true;
             const id = b.dataset.template || '';
-            const cfgId = b.dataset.cfg || '';
-            if (cfgId) show = true;
-            else if (id === 'receipt') show = !!(LAYOUTS[b.dataset.variant] && LAYOUTS[b.dataset.variant].total === state.shots.length);
+            if (id === 'receipt') show = !!(LAYOUTS[b.dataset.variant] && LAYOUTS[b.dataset.variant].total === state.shots.length);
             else if (id !== '') show = b.dataset.layout === effLayout;
             b.classList.toggle('hidden', !show);
             if (show) n++;
@@ -202,7 +184,7 @@
     function paintStepsDesain() {
         const bar = document.getElementById('stepBarDesain');
         if (!bar) return;
-        const designed = state.templateId !== null || state.cfgId !== null || state.builtin === 'receipt';
+        const designed = state.templateId !== null || state.builtin === 'receipt';
         const steps = [[1, 'Jepret', true], [2, 'Desain', true], [3, 'Simpan', designed]];
         let html = '';
         steps.forEach((st, i) => {
@@ -223,11 +205,9 @@
     function renderDesain() {
         filterDesignsDesain();
         paintStepsDesain();
-        const cfgT = selectedCfg();
-        if (previewLayoutBadge) previewLayoutBadge.textContent = cfgT ? '1x3 • 3 foto' : (LAYOUT_LABEL[state.layout] || state.layout);
+        if (previewLayoutBadge) previewLayoutBadge.textContent = LAYOUT_LABEL[state.layout] || state.layout;
         let name = 'Polos';
         if (state.builtin === 'receipt') name = (state.layout === 'receipt_2x3' ? 'Receipt 2x3' : 'Receipt') + ' (2 strip kembar)';
-        else if (cfgT) name = cfgT.nama + ' (1x3)';
         else {
             const t = selectedTemplate();
             if (t) name = t.name + ' (' + t.layout_type + ')';
@@ -238,27 +218,17 @@
 
     document.querySelectorAll('.design-card').forEach(b => b.addEventListener('click', () => {
         const id = b.dataset.template || '';
-        const cfgId = b.dataset.cfg || '';
         if (id === 'receipt') {
             const variant = b.dataset.variant || 'receipt';
             if (!LAYOUTS[variant] || LAYOUTS[variant].total !== state.shots.length) return;
             state.builtin = 'receipt';
             state.templateId = null;
-            state.cfgId = null;
             state.layout = variant; // mode struk kembar prosedural (2 / 2x3 baris per strip)
-        } else if (cfgId) {
-            state.builtin = 'plain';
-            state.templateId = null;
-            state.cfgId = cfgId;
-            state.layout = '1x3';
         } else {
             state.builtin = 'plain';
             const tpl = TEMPLATES.find(t => String(t.id) === String(id)) || null;
             state.templateId = tpl ? tpl.id : null;
-            state.cfgId = null;
-            // Config template (single strip): pakai layout 1x3, ambil 3 foto saja
-            state.layout = '1x3';
-            // Format dikunci ke asal (daftar difilter, jadi selalu cocok).
+            state.layout = BASE_LAYOUT;
         }
         markActiveDesain(b);
         renderDesain();
@@ -313,12 +283,7 @@
         }
     });
 
-    if (previewLayoutBadge) {
-        const isConfig = state.templateId != null;
-        const layoutLabel = isConfig ? '1x3' : state.layout;
-        const shotCount = isConfig ? Math.min(3, state.shots.length) : state.shots.length;
-        previewLayoutBadge.textContent = layoutLabel + ' • ' + shotCount + ' foto';
-    }
+    if (previewLayoutBadge) previewLayoutBadge.textContent = state.layout + ' • ' + state.shots.length + ' foto';
     markActiveDesain(document.querySelector('.design-card[data-template=""]'));
     renderDesain();
 })();

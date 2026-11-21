@@ -1,183 +1,106 @@
 {{-- Mesin gambar strip (shared): dipakai halaman camera + halaman pilih desain.
  Syarat dari halaman pemanggil (di dalam IIFE script yang sama):
    - const state = { layout, filter, templateId, builtin, shots, visitor:{name,social}, ... }
-   - const TEMPLATES = [...] (payload desain + slots + frame/background_url) -akan diisi dari config-
+   - const TEMPLATES = [...] dari database (id, name, layout_type, frame_url, transparent_url,
+     background_url, slots[{x,y,w,h,shape}] sebagai rasio 0-1 terhadap gambar frame utuh)
    - const stripPreview = <canvas> (untuk drawStripPreview)
 --}}
-    // Preload frame overlay & background agar preview langsung tampil saat desain dipilih
+    // Cache lama (dibiarkan agar halaman lain yang merujuknya tidak error)
     const frameCache = {};
-    const transparentFrameCache = {}; // versi transparan (slot = alpha 0), digambar paling atas
+    const transparentFrameCache = {};
     const backgroundCache = {};
-    const detectedCache = {}; // hasil ukur otomatis lubang per template (kunci: id_total)
+    const detectedCache = {};
     function invalidateDetected(id) {
         Object.keys(detectedCache).forEach(k => { if (k.startsWith(id + '_')) delete detectedCache[k]; });
     }
 
-    // --- MEMUAT TEMPLATES DARI CONFIG FILE ---
-    // TEMPLATS diisi dari template-config.js (satu file JSON/TS dengan definisi semua template)
-    // Setiap template memiliki format:
-    // { id, nama, kategori, frame, thumbnail, canvas: {width, height}, slots: [{x, y, w, h, shape?}] }
-    // - Semua koordinat slot adalah rasio 0-1 terhadap ukuran canvas
-    // - Setiap template memiliki 6 slot (3 kiri + 3 kanan) untuk duplikasi 3 foto ke 2 strip
-    // - Bukan ada variants kiri/kanan/both di config; semua template punya 6 slot satuan
-    // - Urutan: slot 1-3 = kiri, slot 4-6 = kanan (x relatif terhadap canvas 1200 total)
-    // - shape: opsional, untuk slot bentuk (oval, hati, blob, polaroid)
-    // - canvas: ukuran asli frame, TIDAK ADA hardcode di kode render
-    //
-    // Konversi dari format config ke internal yang diinginkan:
-    // - kiri: slots[0..2] dengan x_ratio terhadap canvas kiri (0-600)
-    // - kanan: slots[3..5] dengan x_ratio terhadap canvas kanan (600-1200),
-    //   dimodifikasi dengan offset +600 untuk posisi piksel
-    // - holes dan slots dalam render dikonversi dari rasio ke piksel saat perlu
+    // ===== TEMPLATE DATABASE: frame + slot (rasio) =====
+    // Satu file frame = satu template. Foto i mengisi slot i (urutan array slots).
+    // Urutan layer: frame asli (latar) -> foto di slot -> frame transparan paling atas.
+    const dbLoaded = {}, dbPromises = {};
 
-    // Konversi slot ratio ke format internal per varian
-    function convertConfigSlots(tpl) {
-        if (!tpl || !tpl.slots || tpl.slots.length === 0) return null;
-        const canvasW = tpl.canvas ? (tpl.canvas.width || 1200) : 1200;
-        const canvasH = tpl.canvas ? (tpl.canvas.height || 1800) : 1800;
-        const halfW = canvasW / 2; // 600 px: lebar strip kiri/kanan
-
-        // Setiap template punya 6 slot: 3 kiri + 3 kanan
-        // Kita konversi jadi varian kiri dan kanan
-        const leftSlots = [];
-        const rightSlots = [];
-
-        for (let i = 0; i < 3; i++) {
-            const s = tpl.slots[i]; // slot kiri ke-1, 2, 3
-            if (!s) continue;
-
-            // Konversi ratio ke piksel untuk strip kiri (canvas 600x1800)
-            const xLeft = Math.round(s.x * halfW);
-            const yLeft = Math.round(s.y * canvasH);
-            const wLeft = Math.round(s.w * halfW);
-            const hLeft = Math.round(s.h * canvasH);
-
-            leftSlots.push({
-                x: xLeft, y: yLeft, w: wLeft, h: hLeft,
-                kind: s.shape || 'rect',
-                slot: i + 1, side: 'left'
-            });
-
-            // Slot kanan: offset x +600, konversi ratio yang sama tapi terhadap kanan
-            const xRight = Math.round(s.x * halfW + halfW);
-            const yRight = Math.round(s.y * canvasH);
-            const wRight = Math.round(s.w * halfW);
-            const hRight = Math.round(s.h * canvasH);
-
-            rightSlots.push({
-                x: xRight, y: yRight, w: wRight, h: hRight,
-                kind: s.shape || 'rect',
-                slot: i + 3, side: 'right' // slot nomor 4,5,6
-            });
-        }
-
-        if (leftSlots.length === 0 || rightSlots.length === 0) return null;
-
-        return {
-            fw: canvasW, fh: canvasH,
-            holes: [], // tidak digunakan dalam sistem baru; gambar berdasarkan slot directly
-            canvasW: canvasW, canvasH: canvasH,
-            variant: 'gabungan',
-            leftSlots: leftSlots,
-            rightSlots: rightSlots,
-            radius: tpl.slots.length > 0 ? (tpl.slots[0].shape ? 0 : 12) : 12,
-            dupe: true, // selalu dupe dalam sistem baru (6 slot = 2 strip × 3 foto)
-            dupeFactor: 2
-        };
+    function isDbTpl(t) {
+        return !!(t && Array.isArray(t.slots) && t.slots.length > 0
+            && t.slots[0] && typeof t.slots[0] === 'object' && t.frame_url);
     }
 
-    // --- AKHIR LOAD TEMPLATE DARI CONFIG ---
+    function loadImg(src) {
+        return new Promise(res => {
+            if (!src) return res(null);
+            const im = new Image();
+            im.onload = () => res(im);
+            im.onerror = () => { console.error('Gambar gagal dimuat (404?):', src); res(null); };
+            im.src = src;
+        });
+    }
+
+    function dbReady(t) {
+        if (!isDbTpl(t)) return Promise.resolve();
+        if (!dbPromises[t.id]) {
+            dbPromises[t.id] = Promise.all([loadImg(t.frame_url), loadImg(t.transparent_url)])
+                .then(([frame, trans]) => { dbLoaded[t.id] = { frame, trans }; });
+        }
+        return dbPromises[t.id];
+    }
+
+    function paintDbStrip(canvas, W, imgs, tpl) {
+        const d = dbLoaded[tpl.id] || {};
+        const ref = d.trans || d.frame;
+        const ctx = canvas.getContext('2d');
+        if (!ref) {
+            // Frame belum/tidak bisa dimuat: tampilkan placeholder netral
+            canvas.width = W;
+            canvas.height = Math.round(W * 1.5);
+            ctx.fillStyle = '#EDE9E1';
+            ctx.fillRect(0, 0, W, canvas.height);
+            return;
+        }
+        const H = Math.round(W * ref.naturalHeight / ref.naturalWidth);
+        canvas.width = W;
+        canvas.height = H;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, W, H);
+        if (d.frame) ctx.drawImage(d.frame, 0, 0, W, H); // latar (dekorasi)
+        const bleed = Math.max(1, Math.round(2 * W / ref.naturalWidth));
+        tpl.slots.forEach((s, i) => { // foto i -> slot i
+            const im = imgs[i];
+            if (!im) return;
+            drawCover(ctx, im, s.x * W - bleed, s.y * H - bleed, s.w * W + bleed * 2, s.h * H + bleed * 2, 0);
+        });
+        if (d.trans) ctx.drawImage(d.trans, 0, 0, W, H); // frame transparan paling atas
+        if (window.__debug) {
+            tpl.slots.forEach((s, i) => {
+                ctx.save();
+                ctx.strokeStyle = '#ff0000';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(s.x * W, s.y * H, s.w * W, s.h * H);
+                ctx.fillStyle = '#ff0000';
+                ctx.font = '16px Arial';
+                ctx.fillText('S' + (i + 1), s.x * W + 4, s.y * H + 20);
+                ctx.restore();
+            });
+        }
+    }
 
     function selectedTemplate() {
         return TEMPLATES.find(t => String(t.id) === String(state.templateId)) || null;
     }
 
-    // Fungsi: dapatkan template dari config (baca dari state.cfgId)
-    function selectedCfg() {
-        if (state.cfgId) {
-            return window.CFG_TEMPLATES.find(t => String(t.id) === String(state.cfgId)) || null;
-        }
-        return null;
-    }
-
-    // Mesin gambar strip menggunakan template dari config (layout 1x3 single strip)
-    function paintCfgStrip(canvas, W, imgs, cfgTpl) {
-        const k = W / cfgTpl.canvas.width;
-        const ctx = canvas.getContext('2d');
-        // Gambar frame sebagai background
-        const frameImg = new Image();
-        frameImg.src = cfgTpl.frame;
-        frameImg.onload = () => {
-            canvas.width = W;
-            canvas.height = cfgTpl.canvas.height;
-            ctx.drawImage(frameImg, 0, 0, cfgTpl.canvas.width, cfgTpl.canvas.height);
-            // Gambar setiap slot sebagai area transparan dan tempat foto
-            cfgTpl.slots.forEach((s, i) => {
-                const x = s.x * k;
-                const y = s.y * k;
-                const w = s.w * k;
-                const h = s.h * k;
-                // Gambar shot ke slot area
-                if (imgs && imgs[i]) {
-                    ctx.drawImage(imgs[i], x, y, w, h);
-                }
-            });
-            // Draw slot borders untuk visualisasi
-            ctx.strokeStyle = 'rgba(255,0,0,0.5)';
-            ctx.lineWidth = 1;
-            cfgTpl.slots.forEach(s => {
-                const X = s.x * k;
-                const Y = s.y * k;
-                const W2 = s.w * k;
-                const H2 = s.h * k;
-                ctx.strokeRect(X - 2, Y - 2, W2 + 4, H2 + 4);
-            });
-        };
-        frameImg.onerror = () => paintStrip(canvas, W, imgs);
-    }
-
     const LAYOUTS = {
         '2x2': { cols: 2, rows: 2, total: 4 },
         '2x3': { cols: 2, rows: 3, total: 6 },
-        '1x3': { cols: 1, rows: 3, total: 3 }, // satu strip 3 foto (template 2-varian)
+        '1x3': { cols: 1, rows: 3, total: 3 },
         'receipt': { cols: 2, rows: 2, total: 4 }, // 2 strip kembar, tiap strip 1 kolom × 2 foto
         'receipt_2x3': { cols: 2, rows: 3, total: 6 }, // 2 strip kembar, tiap strip 1 kolom × 3 foto
     };
 
-    // --- SISTEM SLOT BARU DARI CONFIG ---
-    // Menggunakan konversi slot dari config file
-    function slottedTemplate() {
-        const tpl = selectedTemplate();
-        if (!tpl) return null;
-
-        // Konversi slot dari format config ke format internal
-        const converted = convertConfigSlots(tpl);
-        if (!converted) return null;
-
-        // Dalam sistem baru, total selalu 6 slot (3 kiri + 3 kanan)
-        // untuk perilaku duplikasi 3 foto ke 2 strip identik
-        const total = 6;
-
-        // Holes tidak digunakan; kita gunakan leftSlots/rightSlots langsung
-        // dalam paintStrip dan paintVariantDouble
-
-        return {
-            fw: converted.canvasW, fh: converted.canvasH,
-            holes: [], // kosong, akan diganti oleh slot positions di paintStrip
-            canvasW: converted.canvasW, canvasH: converted.canvasH,
-            variant: converted.variant,
-            leftSlots: converted.leftSlots,
-            rightSlots: converted.rightSlots,
-            radius: converted.radius,
-            dupe: converted.dupe,
-            dupeFactor: converted.dupeFactor
-        };
-    }
+    // Dipertahankan untuk kompatibilitas halaman lain; template database tidak memakainya.
+    function slottedTemplate() { return null; }
 
     function requiredTotal() {
-        // Dalam sistem baru: selalu 6 slot (3 kiri + 3 kanan) untuk duplikasi 3 foto
-        // 3 foto diambil, lalu diduplikasi ke 6 slot (2 strip × 3 foto)
-        return 6;
+        const t = selectedTemplate();
+        if (isDbTpl(t)) return t.slots.length;
+        return LAYOUTS[state.layout] ? LAYOUTS[state.layout].total : 6;
     }
 
     // ===== Mesin gambar strip (dipakai preview & file simpanan) =====
@@ -194,29 +117,6 @@
 
     // Geometri strip untuk lebar W (s = skala, preview 600px / simpan 900px)
     function geomFor(W) {
-        const slots = slottedTemplate();
-        if (slots) {
-            // Canvas mengikuti rasio asli canvas varian (tidak melar).
-            // Frame transparan ada di atas, jadi foto di-bleed +2px agar tepi
-            // lubang tertutup (hindari garis tipis di sekitar slot berbentuk).
-            const k = W / slots.canvasW;
-            const hasFrame = !!(selectedTemplate() && selectedTemplate().frame_url);
-            const pad = (slots.pad != null) ? slots.pad : (hasFrame ? 2 : 0);
-            // Gunakan leftSlots/rightSlots dari konversi config
-            const holes = slots.leftSlots.concat(slots.rightSlots).map(s => ({
-                x: (s.x - pad) * k,
-                y: (s.y - pad) * k,
-                w: (s.w + pad * 2) * k,
-                h: (s.h + pad * 2) * k,
-            }));
-            const radius = (slots.radius != null ? slots.radius : 12) * k;
-            return { slotted: true, s: k, holes, radius,
-                     H: slots.canvasH * k,
-                     canvasW: slots.canvasW, canvasH: slots.canvasH,
-                     variant: slots.variant,
-                     dupe: !!slots.dupe, dupeFactor: slots.dupeFactor || 1 };
-        }
-        // Fallback: layout grid baku
         const s = W / 600;
         if (state.layout === 'receipt' || state.layout === 'receipt_2x3') {
             const rows = LAYOUTS[state.layout].rows;
@@ -319,7 +219,7 @@
     // Jika orientasi foto tidak cocok dengan lubang (mis. foto portrait di lubang landscape),
     // putar foto terlebih dahulu agar wajah tidak terpotong oleh cover-fit.
     function drawCover(ctx, im, x, y, w, h, r) {
-        const ir = im.width / im.height, cr = w / h;
+        const cr = w / h;
         const imageIsLandscape = im.width >= im.height;
         const holeIsLandscape = w >= h;
         let src = im;
@@ -417,178 +317,36 @@
         ctx.fillText((state.visitor.social || '@sosmed') + '  •  ' + new Date().toLocaleDateString('id-ID'), cx, H - 30 * s);
     }
 
-    // Frame overlay (digambar paling atas). useTransparent=true pakai versi
-    // transparan (slot = alpha 0) sehingga dekorasi tetap di atas foto.
-    function paintFrameOverlay(ctx, W, H, useTransparent = false) {
-        const tpl = state.templateId ? selectedTemplate() : null;
-        let fr = state.templateId ? frameCache[state.templateId] : null;
-        // Pakai versi transparan hanya jika tersedia; template lama yang file
-        // frame-nya sudah transparan tetap memakai frameCache (fallback aman).
-        if (useTransparent && tpl && tpl.transparent_url && transparentFrameCache[state.templateId]) {
-            fr = transparentFrameCache[state.templateId];
-        }
+    // Frame overlay untuk jalur non-database (cache lama). Template database
+    // memakai paintDbStrip, jadi fungsi ini hanya berpengaruh bila cache terisi.
+    function paintFrameOverlay(ctx, W, H) {
+        const fr = state.templateId ? frameCache[state.templateId] : null;
         if (fr && fr.complete && fr.naturalWidth) {
             ctx.drawImage(fr, 0, 0, W, H);
         }
     }
 
-    // Render khusus template 2-varian untuk mode 'dupe' (duplikasi satu varian)
-    // dan 'both' (gabungan asli kiri A + kanan B). Selalu menghasilkan 1200x1800.
-    function paintVariantDouble(canvas, imgs, mode) {
-        const tpl = selectedTemplate();
-        const variant = state.templateVariant || 'gabungan';
-        const W = 1200, H = 1800;
-        canvas.width = W;
-        canvas.height = H;
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#1C1917';
-        ctx.fillRect(0, 0, W, H);
-
-        const useBoth = (mode === 'both' || variant === 'gabungan');
-        const frOrig = tpl ? frameCache[tpl.id] : null;
-        const frTrans = tpl ? transparentFrameCache[tpl.id] : null;
-        const radius = ((tpl.slots && tpl.slots.radius) || 3);
-
-        if (useBoth) {
-            // Gabungan asli: frame penuh, 6 lubang (3 foto di-duplikasi ke kedua sisi)
-            // Dalam sistem baru: gunakan slots dari konversi config
-            const v = tpl ? convertConfigSlots(tpl) : null;
-            if (!v) return;
-
-            ctx.drawImage(frOrig, 0, 0, W, H);
-
-            // Gambar 6 slot: 3 kiri + 3 kanan
-            const shotIdx = [0, 1, 2, 0, 1, 2];
-            // Urutan: slot 1-3 kiri, slot 4-6 kanan
-            const allSlots = [...v.leftSlots, ...v.rightSlots];
-
-            allSlots.forEach((s, i) => {
-                const im = imgs[shotIdx[i]];
-                if (!im) return;
-                // Gambar ke posisi slot (sudah dalam koordinat piksel canvas 1200x1800)
-                drawCover(ctx, im, s.x - 2, s.y - 2, s.w + 4, s.h + 4, radius);
-            });
-
-            if (window.__debug) {
-                allSlots.forEach((s, i) => {
-                    ctx.save(); ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 2;
-                    ctx.strokeRect(s.x, s.y, s.w, s.h);
-                    ctx.font = '16px Arial'; ctx.fillStyle = '#ff0000';
-                    ctx.fillText('S' + (shotIdx[i] + 1), s.x + 4, s.y + 20);
-                    ctx.restore();
-                });
-            }
-            if (frTrans && frTrans.complete && frTrans.naturalWidth) ctx.drawImage(frTrans, 0, 0, W, H);
-            return;
-        }
-
-        // Dupe: duplikasi desain varian (kiri/kanan) ke dua sisi
-        // Dalam sistem baru: gunakan slots dari konversi config
-        const v = tpl ? convertConfigSlots(tpl) : null;
-        if (!v) return;
-
-        const sx = variant === 'kanan' ? 600 : 0;
-        const drawFrameHalf = (img, dx) => {
-            if (img && img.complete && img.naturalWidth) ctx.drawImage(img, sx, 0, 600, 1800, dx, 0, 600, 1800);
-        };
-        drawFrameHalf(frOrig, 0);
-        drawFrameHalf(frOrig, 600);
-        const shotIdx = [0, 1, 2, 0, 1, 2];
-        [0, 600].forEach(dx => {
-            v.leftSlots.forEach((s, j) => {
-                const im = imgs[shotIdx[j]];
-                if (!im) return;
-                drawCover(ctx, im, dx + s.x - 2, s.y - 2, s.w + 4, s.h + 4, radius);
-            });
-            v.rightSlots.forEach((s, j) => {
-                const im = imgs[shotIdx[j + 3]]; // slot 4,5,6 untuk kanan
-                if (!im) return;
-                drawCover(ctx, im, dx + s.x - 2, s.y - 2, s.w + 4, s.h + 4, radius);
-            });
-        });
-        if (window.__debug) {
-            [0, 600].forEach(dx => {
-                v.leftSlots.forEach((s, j) => {
-                    ctx.save(); ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 2;
-                    ctx.strokeRect(dx + s.x, s.y, s.w, s.h);
-                    ctx.font = '16px Arial'; ctx.fillStyle = '#ff0000';
-                    ctx.fillText('S' + (shotIdx[j] + 1), dx + s.x + 4, s.y + 20);
-                    ctx.restore();
-                });
-                v.rightSlots.forEach((s, j) => {
-                    ctx.save(); ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 2;
-                    ctx.strokeRect(dx + s.x, s.y, s.w, s.h);
-                    ctx.font = '16px Arial'; ctx.fillStyle = '#ff0000';
-                    ctx.fillText('S' + (shotIdx[j + 3] + 1), dx + s.x + 4, s.y + 20);
-                    ctx.restore();
-                });
-            });
-        }
-        drawFrameHalf(frTrans, 0);
-        drawFrameHalf(frTrans, 600);
-    }
-
     function paintStrip(canvas, W, imgs) {
-        const cfgTpl = selectedCfg();
-        if (cfgTpl) { paintCfgStrip(canvas, W, imgs, cfgTpl); return; }
-        const tpl = selectedTemplate();
-        const isVariant = tpl && tpl.slots && state.builtin !== 'receipt';
-        const mode = isVariant ? (state.printMode || 'single') : 'single';
-        if (isVariant && (mode === 'dupe' || mode === 'both')) {
-            paintVariantDouble(canvas, imgs, mode);
+        // Template database: frame utuh + slot rasio, jalur render sendiri.
+        const dbTpl = selectedTemplate();
+        if (isDbTpl(dbTpl) && state.builtin !== 'receipt') {
+            paintDbStrip(canvas, W, imgs, dbTpl);
             return;
         }
+        // Polos / Receipt (prosedural)
         const g = geomFor(W);
         canvas.width = W;
         canvas.height = g.H;
         const ctx = canvas.getContext('2d');
-        if (g.slotted) {
-            // Background = frame asli (menunjukkan dekorasi di area non-slot).
-            // Foto digambar di lubang slot. Frame transparan digambar PALING ATAS
-            // (slot-nya alpha 0 → foto kelihatan; dekorasi/bintang/klip di atas foto).
-            const bg = state.templateId ? frameCache[state.templateId] : null;
-            if (bg && bg.complete && bg.naturalWidth) {
-                ctx.drawImage(bg, 0, 0, W, g.H);
-            } else {
-                ctx.fillStyle = '#1C1917';
-                ctx.fillRect(0, 0, W, g.H);
-            }
-            g.holes.forEach((hole, i) => {
-                // Dupe template (mis. Express Yourself): 3 foto diduplikasi ke 6 slot.
-                const sourceIdx = g.dupe ? Math.floor(i / g.dupeFactor) : i;
-                const im = imgs[sourceIdx];
-                if (!im || !hole) return;
-                drawCover(ctx, im, hole.x, hole.y, hole.w, hole.h, g.radius);
-            });
-            // Debug: kotak merah tipis di bounding box tiap slot (?debug=1)
-            if (window.__debug) {
-                g.holes.forEach((hole, i) => {
-                    ctx.save();
-                    ctx.strokeStyle = '#ff0000';
-                    ctx.lineWidth = Math.max(1, 2 * g.s);
-                    ctx.strokeRect(hole.x, hole.y, hole.w, hole.h);
-                    ctx.font = Math.max(12, 16 * g.s) + 'px Arial';
-                    ctx.fillStyle = '#ff0000';
-                    ctx.fillText('S' + (i + 1), hole.x + 4, hole.y + Math.max(14, 24 * g.s));
-                    ctx.restore();
-                });
-            }
-            // Frame transparan paling atas: dekorasi di atas foto, slot tetap lubang.
-            paintFrameOverlay(ctx, W, g.H, true);
-            return;
-        }
         const bg = state.templateId ? backgroundCache[state.templateId] : null;
         const hasBg = bg && bg.complete && bg.naturalWidth;
         if (hasBg) {
-            // Background upload admin — 100% persis seperti file (pixel sky, dll.) cover seluruh strip
             ctx.drawImage(bg, 0, 0, W, g.H);
         } else {
             paintChrome(ctx, W, g);
         }
         paintPhotos(ctx, g, imgs);
         if (!hasBg) paintFooter(ctx, W, g);
-        // Jika pakai background, visitor name tidak digambar ulang agar 100% sesuai file upload
-        // (data tetap tersimpan di DB dan tampil di halaman result/admin)
         paintFrameOverlay(ctx, W, g.H);
     }
 
@@ -600,16 +358,26 @@
     });
 
     function drawStripPreview() {
-        // Geometri dihitung ulang saat gambar selesai dimuat (layout bisa berubah)
-        Promise.all(state.shots.map(loadShot)).then((imgs) => paintStrip(stripPreview, 600, imgs));
+        const t = selectedTemplate();
+        const tid = state.templateId;
+        // Tunggu frame template + semua foto selesai dimuat sebelum menggambar
+        Promise.all([dbReady(t), Promise.all(state.shots.map(loadShot))]).then(([, imgs]) => {
+            if (state.templateId !== tid) return; // user sudah pindah desain
+            paintStrip(stripPreview, 600, imgs);
+        });
     }
 
     function fullResStrip() {
-        // Resolusi asli: 600x1800 (satu strip) atau 1200x1800 (dua strip).
-        return Promise.all(state.shots.map(loadShot)).then((imgs) => {
+        // Resolusi asli frame (template database) atau 900px (Polos / Receipt).
+        const t = selectedTemplate();
+        return Promise.all([dbReady(t), Promise.all(state.shots.map(loadShot))]).then(([, imgs]) => {
             const cv = document.createElement('canvas');
-            const s = slottedTemplate();
-            const W = s ? s.canvasW : 900;
+            let W = 900;
+            if (isDbTpl(t) && state.builtin !== 'receipt') {
+                const d = dbLoaded[t.id] || {};
+                const ref = d.trans || d.frame;
+                if (ref) W = ref.naturalWidth;
+            }
             paintStrip(cv, W, imgs);
             return cv.toDataURL('image/jpeg', 0.85);
         });
