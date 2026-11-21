@@ -60,14 +60,17 @@
         canvas.height = H;
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, W, H);
-        if (d.frame) ctx.drawImage(d.frame, 0, 0, W, H); // latar (dekorasi)
-        const bleed = Math.max(1, Math.round(2 * W / ref.naturalWidth));
-        tpl.slots.forEach((s, i) => { // foto i -> slot i
+        // 1) Gambar 6 foto ke tiap slot, CLIP ketelitian ke boundary slot
+        //    Urutan: background -> foto per-slot (diclip) -> frame transparan di bawah
+        tpl.slots.forEach((s, i) => {
             const im = imgs[i];
             if (!im) return;
-            drawCover(ctx, im, s.x * W - bleed, s.y * H - bleed, s.w * W + bleed * 2, s.h * H + bleed * 2, 0);
+            drawCover(ctx, im, s.x * W, s.y * H, s.w * W, s.h * H, 0);
         });
-        if (d.trans) ctx.drawImage(d.trans, 0, 0, W, H); // frame transparan paling atas
+        // 2) Gambar frame transparan PADA AKHIR (atas semua)
+        //    Tanpa urutan ini, frame akan tertutup oleh foto
+        if (d.trans) ctx.drawImage(d.trans, 0, 0, W, H);
+        // 3) Debug: kotak merah batas slot (digambar sesudah frame/foto)
         if (window.__debug) {
             tpl.slots.forEach((s, i) => {
                 ctx.save();
@@ -78,9 +81,9 @@
                 ctx.font = '16px Arial';
                 ctx.fillText('S' + (i + 1), s.x * W + 4, s.y * H + 20);
                 ctx.restore();
-            });
-        }
-    }
+           });
+       }
+   }
 
     function selectedTemplate() {
         return TEMPLATES.find(t => String(t.id) === String(state.templateId)) || null;
