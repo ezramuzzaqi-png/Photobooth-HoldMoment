@@ -18,3 +18,4 @@ yarn-error.log
 /.idea
 /.vscode
 slots-semua-template.json
+__pycache__/
