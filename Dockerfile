@@ -1,3 +1,10 @@
+FROM node:20 AS assets
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
 FROM php:8.4-cli
 
 RUN apt-get update && apt-get install -y \
@@ -10,9 +17,10 @@ COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /app
 COPY . .
+COPY --from=assets /app/public/build ./public/build
 
 RUN composer install --optimize-autoloader --no-dev --no-interaction --no-scripts
 
-# Storage persisten dikelola lewat Railway Volume (mount path: /app/storage/app/public)
+# Storage persisten dikelola lewat Railway Volume (mount path: /data)
 
-CMD sh -c "mkdir -p storage/app/public && php artisan config:clear && php artisan migrate --force && (php artisan db:seed --force || true) && (php artisan storage:link || true) && php artisan serve --host=0.0.0.0 --port=\${PORT:-8080}"
+CMD sh -c "mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs bootstrap/cache && chmod -R 775 storage bootstrap/cache && mkdir -p /data/public /data/database && touch /data/database/database.sqlite && rm -rf storage/app/public && ln -sfn /data/public storage/app/public && php artisan config:clear && php artisan migrate --force && (php artisan db:seed --force || true) && (php artisan storage:link || true) && php artisan serve --host=0.0.0.0 --port=\${PORT:-8080}"
